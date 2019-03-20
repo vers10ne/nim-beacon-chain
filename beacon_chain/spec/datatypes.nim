@@ -67,6 +67,12 @@ const
   ## slot_to_epoch(GENESIS_SLOT)
   ZERO_HASH* = Eth2Digest()
 
+  # Not part of spec
+  WEAK_SUBJECTVITY_PERIOD* =
+    Slot(uint64(4 * 30 * 24 * 60 * 60) div SECONDS_PER_SLOT)
+    # TODO: This needs revisiting.
+    # Why was the validator WITHDRAWAL_PERIOD altered in the spec?
+
 type
   ValidatorIndex* = range[0'u32 .. 0xFFFFFF'u32] # TODO: wrap-around
 

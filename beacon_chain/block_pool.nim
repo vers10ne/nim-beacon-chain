@@ -87,10 +87,10 @@ proc init*(T: type BlockPool, db: BeaconChainDB): BlockPool =
   else:
     headRef = tailRef
 
-  var blocksBySlot = initTable[uint64, seq[BlockRef]]()
+  var blocksBySlot = initTable[Slot, seq[BlockRef]]()
   for _, b in tables.pairs(blocks):
     let slot = db.getBlock(b.root).get().slot
-    blocksBySlot.mgetOrPut(slot.uint64, @[]).add(b)
+    blocksBySlot.mgetOrPut(slot, @[]).add(b)
 
   let
     # The head state is necessary to find out what we considered to be the
@@ -128,11 +128,21 @@ proc init*(T: type BlockPool, db: BeaconChainDB): BlockPool =
     heads: @[head]
   )
 
-proc addSlotMapping(pool: BlockPool, slot: uint64, br: BlockRef) =
+proc addSlotMapping(pool: BlockPool, br: BlockRef) =
   proc addIfMissing(s: var seq[BlockRef], v: BlockRef) =
     if v notin s:
       s.add(v)
-  pool.blocksBySlot.mgetOrPut(slot, @[]).addIfMissing(br)
+  pool.blocksBySlot.mgetOrPut(br.slot, @[]).addIfMissing(br)
+
+proc delSlotMapping(pool: BlockPool, br: BlockRef) =
+  var blks = pool.blocksBySlot.getOrDefault(br.slot)
+  if blks.len != 0:
+    let i = blks.find(br)
+    if i >= 0: blks.del(i)
+    if blks.len == 0:
+      pool.blocksBySlot.del(br.slot)
+    else:
+      pool.blocksBySlot[br.slot] = blks
 
 proc updateStateData*(
   pool: BlockPool, state: var StateData, bs: BlockSlot) {.gcsafe.}
@@ -149,7 +159,7 @@ proc addResolvedBlock(
 
   pool.blocks[blockRoot] = blockRef
 
-  pool.addSlotMapping(blck.slot.uint64, blockRef)
+  pool.addSlotMapping(blockRef)
 
   # Resolved blocks should be stored in database
   pool.db.putBlock(blockRoot, blck)
@@ -322,8 +332,8 @@ proc getOrResolve*(pool: var BlockPool, root: Eth2Digest): BlockRef =
   if result.isNil:
     pool.missing[root] = MissingBlock(slots: 1)
 
-iterator blockRootsForSlot*(pool: BlockPool, slot: uint64|Slot): Eth2Digest =
-  for br in pool.blocksBySlot.getOrDefault(slot.uint64, @[]):
+iterator blockRootsForSlot*(pool: BlockPool, slot: Slot): Eth2Digest =
+  for br in pool.blocksBySlot.getOrDefault(slot, @[]):
     yield br.root
 
 proc checkMissing*(pool: var BlockPool): seq[FetchRecord] =
@@ -495,6 +505,44 @@ func isAncestorOf*(a, b: BlockRef): bool =
   else:
     a.isAncestorOf(b.parent)
 
+proc delBlockAndState(pool: BlockPool, blockRoot: Eth2Digest) =
+  if (let blk = pool.db.getBlock(blockRoot); blk.isSome):
+    pool.db.delState(blk.get.stateRoot)
+    pool.db.delBlock(blockRoot)
+
+proc delFinalizedStateIfNeeded(pool: BlockPool, b: BlockRef) =
+  # Delete finalized state for block `b` from the database, that doesn't need
+  # to be kept for replaying.
+  # TODO: Currently the protocol doesn't provide a way to request states,
+  # so we don't need any of the finalized states, and thus remove all of them
+  # (except the most recent)
+  if (let blk = pool.db.getBlock(b.root); blk.isSome):
+    pool.db.delState(blk.get.stateRoot)
+
+proc setTailBlock(pool: BlockPool, newTail: BlockRef) =
+  ## Advance tail block, pruning all the states and blocks with older slots
+  let oldTail = pool.tail
+  let fromSlot = oldTail.slot.uint64
+  let toSlot = newTail.slot.uint64 - 1
+  assert(toSlot > fromSlot)
+  for s in fromSlot .. toSlot:
+    for b in pool.blocksBySlot.getOrDefault(s.Slot, @[]):
+      pool.delBlockAndState(b.root)
+      b.children = @[]
+      b.parent = nil
+      pool.blocks.del(b.root)
+      pool.pending.del(b.root)
+      pool.missing.del(b.root)
+
+    pool.blocksBySlot.del(s.Slot)
+
+  pool.db.putTailBlock(newTail.root)
+  pool.tail = newTail
+  pool.addSlotMapping(newTail)
+  info "Tail block updated",
+    slot = humaneSlotNum(newTail.slot),
+    root = shortLog(newTail.root)
+
 proc updateHead*(pool: BlockPool, state: var StateData, blck: BlockRef) =
   ## Update what we consider to be the current head, as given by the fork
   ## choice.
@@ -536,9 +584,10 @@ proc updateHead*(pool: BlockPool, state: var StateData, blck: BlockRef) =
       finalizedEpoch = humaneEpochNum(state.data.data.finalized_epoch)
 
   let
+    finalizedEpochStartSlot = state.data.data.finalized_epoch.get_epoch_start_slot()
     # TODO there might not be a block at the epoch boundary - what then?
     finalizedHead =
-      blck.findAncestorBySlot(state.data.data.finalized_epoch.get_epoch_start_slot())
+      blck.findAncestorBySlot(finalizedEpochStartSlot)
 
   doAssert (not finalizedHead.blck.isNil),
     "Block graph should always lead to a finalized block"
@@ -566,6 +615,10 @@ proc updateHead*(pool: BlockPool, state: var StateData, blck: BlockRef) =
       for child in cur.parent.children:
         if child != cur:
           pool.blocks.del(child.root)
+          pool.delBlockAndState(child.root)
+          pool.delSlotMapping(child)
+        else:
+          pool.delFinalizedStateIfNeeded(child)
       cur.parent.children = @[cur]
       cur = cur.parent
 
@@ -577,6 +630,14 @@ proc updateHead*(pool: BlockPool, state: var StateData, blck: BlockRef) =
       if pool.heads[n].blck.slot < pool.finalizedHead.blck.slot and
           not pool.heads[n].blck.isAncestorOf(pool.finalizedHead.blck):
         pool.heads.del(n)
+
+  # Calculate new tail block and set it
+  # New tail should be WEAK_SUBJECTIVITY_PERIOD * 2 older than finalizedHead
+  const tailSlotInterval = WEAK_SUBJECTVITY_PERIOD * 2
+  if finalizedEpochStartSlot - GENESIS_SLOT > tailSlotInterval:
+    let tailSlot = finalizedEpochStartSlot - tailSlotInterval
+    let newTail = finalizedHead.blck.findAncestorBySlot(tailSlot)
+    pool.setTailBlock(newTail.blck)
 
 proc latestJustifiedBlock*(pool: BlockPool): BlockRef =
   ## Return the most recent block that is justified and at least as recent
