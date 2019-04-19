@@ -271,6 +271,7 @@ proc getAttachedValidator(
 proc updateHead(node: BeaconNode, slot: Slot): BlockRef =
   # Use head state for attestation resolution below
   # TODO do we need to resolve attestations using all available head states?
+  let startTime = epochTime()
   node.blockPool.withState(
       node.stateCache, BlockSlot(blck: node.blockPool.head, slot: slot)):
     # Check pending attestations - maybe we found some blocks for them
@@ -300,6 +301,9 @@ proc updateHead(node: BeaconNode, slot: Slot): BlockRef =
     newHeadBlockRoot = shortLog(newHead.root)
 
   node.blockPool.updateHead(node.stateCache, newHead)
+  let dt = epochTime() - startTime
+  if dt > 0.8:
+    warn "updateHead took too long", dt
   newHead
 
 proc sendAttestation(node: BeaconNode,
