@@ -207,8 +207,10 @@ p2pProtocol BeaconSync(version = 1,
             needed: openarray[FetchRecord]) =
       var resp = newseq[BeaconBlock]()
       let db = peer.networkState.db
+      debug "getAncestorBlocks", numRoots = needed.len
       for rec in needed:
         if (var blck = db.getBlock(rec.root); blck.isSome()):
+          debug "getAncestorBlocks for root", root = shortLog(rec.root), numSlots = rec.historySlots
           # TODO validate historySlots
           let firstSlot = blck.get().slot - rec.historySlots
 
