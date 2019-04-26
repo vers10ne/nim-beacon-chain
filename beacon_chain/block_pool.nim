@@ -4,6 +4,14 @@ import
   beacon_node_types,
   spec/[crypto, datatypes, digest, helpers]
 
+import times
+
+template bench(name: string, body: untyped) =
+  let s = epochTime()
+  body
+  let e = epochTime()
+  echo "Benchamrk ", name, " took ", e - s
+
 proc parent*(bs: BlockSlot): BlockSlot =
   BlockSlot(
     blck: if bs.slot > bs.blck.slot: bs.blck else: bs.blck.parent,
@@ -380,6 +388,9 @@ proc rewindState(pool: BlockPool, state: var StateData, bs: BlockSlot):
     seq[BlockData] =
   var ancestors = @[pool.get(bs.blck)]
   # Common case: the last block applied is the parent of the block to apply:
+  # if not bs.blck.parent.isNil:
+  #   info "rewindState", bsSlot = humaneSlotNum(bs.slot), sSlot = humaneSlotNum(state.data.slot),
+  #       bsParent = shortLog(bs.blck.parent.root), sParent = shortLog(state.blck.root)
   if not bs.blck.parent.isNil and state.blck.root == bs.blck.parent.root and
       state.data.data.slot < bs.slot:
     return ancestors

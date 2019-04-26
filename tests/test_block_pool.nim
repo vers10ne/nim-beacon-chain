@@ -11,6 +11,8 @@ import
   ../beacon_chain/spec/[beaconstate, crypto, datatypes, digest, helpers, validator],
   ../beacon_chain/[beacon_node_types, block_pool, beacon_chain_db, extras, state_transition, ssz]
 
+import chronicles
+
 suite "Block pool processing" & preset():
   let
     genState = initialize_beacon_state_from_eth1(
@@ -93,3 +95,34 @@ suite "Block pool processing" & preset():
       hash_tree_root(state.data.data) == state.data.root
       pool2.get(b1Root).isSome()
       pool2.get(b2Root).isSome()
+
+  test "Simple block add&get":
+    var
+      pool = BlockPool.init(makeTestDB(genState, genBlock))
+      state = pool.loadTailState()
+
+    var prevBlockBody = BeaconBlockBody()
+    var prevBlockRoot = state.blck.root
+
+    for i in 0 .. 500:
+      echo "Adding block ", i
+      let
+        b1 = makeBlock(state.data.data, prevBlockRoot, prevBlockBody)
+        b1Root = signing_root(b1)
+      echo "root: ", shortLog(b1Root)
+      prevBlockBody = b1.body
+      prevBlockRoot = b1Root
+
+      # TODO the return value is ugly here, need to fix and test..
+      discard pool.add(state, b1Root, b1)
+      check:
+        state.blck.root == b1Root
+      info "Block added", newStateSlot = humaneSlotNum(state.data.data.slot), newStateBlock = shortLog(state.blck.root),
+          newStateBlockSlot = humaneSlotNum(state.blck.slot)
+
+    # let b1Ref = pool.get(b1Root)
+    #
+    # check:
+    #   b1Ref.isSome()
+    #   b1Ref.get().refs.root == b1Root
+
