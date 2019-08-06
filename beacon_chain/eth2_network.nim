@@ -1,6 +1,6 @@
 import
   options, tables,
-  chronos, json_serialization, strutils, chronicles, eth/net/nat,
+  json_serialization, strutils, chronicles,
   spec/digest, version, conf
 
 const
@@ -9,45 +9,48 @@ const
 export
   version
 
-let
-  globalListeningAddr = parseIpAddress("0.0.0.0")
+when networkBackend != noneBackend:
+  import chronos, eth/net/nat
 
-proc setupNat(conf: BeaconNodeConf): tuple[ip: IpAddress,
-                                           tcpPort: Port,
-                                           udpPort: Port] =
-  # defaults
-  result.ip = globalListeningAddr
-  result.tcpPort = Port(conf.tcpPort)
-  result.udpPort = Port(conf.udpPort)
+  let
+    globalListeningAddr = parseIpAddress("0.0.0.0")
 
-  var nat: NatStrategy
-  case conf.nat.toLowerAscii:
-    of "any":
-      nat = NatAny
-    of "none":
-      nat = NatNone
-    of "upnp":
-      nat = NatUpnp
-    of "pmp":
-      nat = NatPmp
-    else:
-      if conf.nat.startsWith("extip:") and isIpAddress(conf.nat[6..^1]):
-        # any required port redirection is assumed to be done by hand
-        result.ip = parseIpAddress(conf.nat[6..^1])
+  proc setupNat(conf: BeaconNodeConf): tuple[ip: IpAddress,
+                                            tcpPort: Port,
+                                            udpPort: Port] =
+    # defaults
+    result.ip = globalListeningAddr
+    result.tcpPort = Port(conf.tcpPort)
+    result.udpPort = Port(conf.udpPort)
+
+    var nat: NatStrategy
+    case conf.nat.toLowerAscii:
+      of "any":
+        nat = NatAny
+      of "none":
         nat = NatNone
+      of "upnp":
+        nat = NatUpnp
+      of "pmp":
+        nat = NatPmp
       else:
-        error "not a valid NAT mechanism, nor a valid IP address", value = conf.nat
-        quit(QuitFailure)
+        if conf.nat.startsWith("extip:") and isIpAddress(conf.nat[6..^1]):
+          # any required port redirection is assumed to be done by hand
+          result.ip = parseIpAddress(conf.nat[6..^1])
+          nat = NatNone
+        else:
+          error "not a valid NAT mechanism, nor a valid IP address", value = conf.nat
+          quit(QuitFailure)
 
-  if nat != NatNone:
-    let extIP = getExternalIP(nat)
-    if extIP.isSome:
-      result.ip = extIP.get()
-      let extPorts = redirectPorts(tcpPort = result.tcpPort,
-                                   udpPort = result.udpPort,
-                                   description = clientId)
-      if extPorts.isSome:
-        (result.tcpPort, result.udpPort) = extPorts.get()
+    if nat != NatNone:
+      let extIP = getExternalIP(nat)
+      if extIP.isSome:
+        result.ip = extIP.get()
+        let extPorts = redirectPorts(tcpPort = result.tcpPort,
+                                    udpPort = result.udpPort,
+                                    description = clientId)
+        if extPorts.isSome:
+          (result.tcpPort, result.udpPort) = extPorts.get()
 
 when networkBackend == rlpxBackend:
   import
@@ -122,7 +125,7 @@ when networkBackend == rlpxBackend:
   func peersCount*(node: Eth2Node): int =
     node.peerPool.len
 
-else:
+elif networkBackend == libp2pBackend:
   import
     os, random, stew/io,
     libp2p/crypto/crypto, libp2p/daemon/daemonapi, eth/async_utils,
@@ -269,3 +272,10 @@ else:
     shuffle peers
     if peers.len > maxPeers: peers.setLen(maxPeers)
     for p in peers: yield p
+
+else:
+  static: doAssert networkBackend == noneBackend
+  type
+    Eth2Node* = object
+    Eth2NodeIdentity* = object
+    BootstrapAddr* = object
