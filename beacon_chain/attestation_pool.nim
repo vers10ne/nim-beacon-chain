@@ -165,6 +165,12 @@ proc add*(pool: var AttestationPool,
     participants = get_attesting_indices_seq(
       state, attestation.data, validation.aggregation_bits)
 
+  trace "attestation_pool:add",
+    attestation=attestation,
+    participants=participants,
+    idx=idx,
+    attestationSlot=attestationSlot
+
   var found = false
   for a in slotData.attestations.mitems():
     if a.data == attestation.data:

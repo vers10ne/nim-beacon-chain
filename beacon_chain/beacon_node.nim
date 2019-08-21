@@ -437,6 +437,8 @@ proc onAttestation(node: BeaconNode, attestation: Attestation) =
     node.blockPool.withState(node.stateCache, bs):
       node.attestationPool.add(state, attestedBlock, attestation)
   else:
+    trace "Attestation received with unknown beacon block root",
+      attestation=attestation
     node.attestationPool.addUnresolved(attestation)
 
 proc onBeaconBlock(node: BeaconNode, blck: BeaconBlock) =
@@ -519,6 +521,11 @@ proc handleAttestations(node: BeaconNode, head: BlockRef, slot: Slot) =
         if validator != nil:
           let ad = makeAttestationData(state, shard, blck.root)
           attestations.add((ad, committee.len, i, validator))
+          trace "handleAttestation",
+            i=i,
+            validatorIdx=validatorIdx.uint64,
+            committee=committee,
+            ad=ad
 
   for a in attestations:
     traceAsyncErrors sendAttestation(
